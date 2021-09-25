@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 ### Go template
+=======
+>>>>>>> ada34eb... Initial commit
 # Binaries for programs and plugins
 *.exe
 *.exe~
@@ -14,5 +17,8 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+<<<<<<< HEAD
 .idea
 
+=======
+>>>>>>> ada34eb... Initial commit
