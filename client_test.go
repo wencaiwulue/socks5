@@ -91,32 +91,3 @@ func TestBind(t *testing.T) {
 	log.Println(net.IPv4(b[0], b[1], b[2], b[3]))
 
 }
-func TestBind2(t *testing.T) {
-	setupServer()
-	u := UsernamePassword{
-		Username: "aa",
-		Password: "bbb",
-	}
-	d := &Dialer{
-		ProxyNetwork: "tcp4",
-		ProxyAddress: "127.0.0.1:1080",
-		Cmd:          CmdBind,
-		AuthMethods: []AuthMethod{
-			AuthMethodNotRequired,
-			AuthMethodUsernamePassword,
-		},
-		Authenticate: u.Authenticate,
-	}
-
-	conn, err := d.DialContext(context.TODO(), "tcp", "127.0.0.1:80")
-	if err != nil {
-		log.Fatal(err)
-	}
-	conn.Write([]byte("hello"))
-
-	bytes, err := io.ReadAll(conn)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(string(bytes))
-}

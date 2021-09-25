@@ -234,24 +234,26 @@ func (h *serverHandler) handleConnect(conn net.Conn, req *Request) error {
 func (h *serverHandler) handleBind(conn net.Conn, req *Request) error {
 	addr := req.Address()
 	bindAddr, _ := net.ResolveTCPAddr("tcp", addr)
-	ln, err := net.ListenTCP("tcp", bindAddr) // strict mode: if the port already in use, it will return error
+	ln, err := net.ListenTCP("tcp", bindAddr)
 	if err != nil {
 		log.Println(err)
 		_, _ = conn.Write(Response{VER: Version5, REP: byte(StatusFailed), RSV: 0x0, ATYP: 0}.ToBytes())
 		return err
 	}
 
-	//socksAddr := toSocksAddr(ln.Addr())
-	// Issue: may not reachable when host has multi-interface
-	//socksAddr.Host, _, _ = net.SplitHostPort(conn.LocalAddr().String())
-	//reply := gosocks5.NewReply(gosocks5.Succeeded, socksAddr)
+	var ATYP byte
+	if ln.Addr().(*net.TCPAddr).IP.To4() != nil {
+		ATYP = AddrTypeIPv4
+	} else {
+		ATYP = AddrTypeIPv6
+	}
 	bytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(bytes, uint16(ln.Addr().(*net.TCPAddr).Port))
 	if _, err = conn.Write(Response{
 		VER:     Version5,
 		REP:     byte(StatusSucceeded),
 		RSV:     req.RSV,
-		ATYP:    req.ATYP,
+		ATYP:    ATYP,
 		BNDADDR: ln.Addr().(*net.TCPAddr).IP,
 		BNDPORT: bytes,
 	}.ToBytes()); err != nil {
@@ -295,7 +297,7 @@ func (h *serverHandler) handleBind(conn net.Conn, req *Request) error {
 
 	for {
 		select {
-		case err := <-accept():
+		case err = <-accept():
 			if err != nil || pconn == nil {
 				return err
 			}
@@ -364,4 +366,9 @@ func toSocksAddr(addr net.Addr) *Addr {
 		Name: host,
 		Port: port,
 	}
+}
+
+func (h *serverHandler) handleUdp(conn net.Conn, request *Request) error {
+	_, _ = conn.Write([]byte("Not support udp"))
+	return nil
 }
