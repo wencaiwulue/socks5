@@ -1,21 +1,168 @@
-// Copyright 2018 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-// Package socks provides a SOCKS version 5 client implementation.
-//
-// SOCKS protocol version 5 is defined in RFC 1928.
-// Username/Password authentication for SOCKS version 5 is defined in
-// RFC 1929.
-package socks
+package socks5
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"time"
 )
+
+var (
+	noDeadline   = time.Time{}
+	aLongTimeAgo = time.Unix(1, 0)
+)
+
+func (d *Dialer) connect(ctx context.Context, c net.Conn, address string) (_ net.Addr, ctxErr error) {
+	host, port, err := splitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !deadline.IsZero() {
+		c.SetDeadline(deadline)
+		defer c.SetDeadline(noDeadline)
+	}
+	if ctx != context.Background() {
+		errCh := make(chan error, 1)
+		done := make(chan struct{})
+		defer func() {
+			close(done)
+			if ctxErr == nil {
+				ctxErr = <-errCh
+			}
+		}()
+		go func() {
+			select {
+			case <-ctx.Done():
+				c.SetDeadline(aLongTimeAgo)
+				errCh <- ctx.Err()
+			case <-done:
+				errCh <- nil
+			}
+		}()
+	}
+
+	b := make([]byte, 0, 6+len(host)) // the size here is just an estimate
+	b = append(b, Version5)
+	if len(d.AuthMethods) == 0 || d.Authenticate == nil {
+		b = append(b, 1, byte(AuthMethodNotRequired))
+	} else {
+		ams := d.AuthMethods
+		if len(ams) > 255 {
+			return nil, errors.New("too many authentication methods")
+		}
+		b = append(b, byte(len(ams)))
+		for _, am := range ams {
+			b = append(b, byte(am))
+		}
+	}
+	if _, ctxErr = c.Write(b); ctxErr != nil {
+		return
+	}
+
+	if _, ctxErr = io.ReadFull(c, b[:2]); ctxErr != nil {
+		return
+	}
+	if b[0] != Version5 {
+		return nil, errors.New("unexpected protocol version " + strconv.Itoa(int(b[0])))
+	}
+	am := AuthMethod(b[1])
+	if am == AuthMethodNoAcceptableMethods {
+		return nil, errors.New("no acceptable authentication methods")
+	}
+	if d.Authenticate != nil {
+		if ctxErr = d.Authenticate(ctx, c, am); ctxErr != nil {
+			return
+		}
+	}
+
+	b = b[:0]
+	b = append(b, Version5, byte(d.Cmd), 0)
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			b = append(b, AddrTypeIPv4)
+			b = append(b, ip4...)
+		} else if ip6 := ip.To16(); ip6 != nil {
+			b = append(b, AddrTypeIPv6)
+			b = append(b, ip6...)
+		} else {
+			return nil, errors.New("unknown address type")
+		}
+	} else {
+		if len(host) > 255 {
+			return nil, errors.New("FQDN too long")
+		}
+		b = append(b, AddrTypeFQDN)
+		b = append(b, byte(len(host)))
+		b = append(b, host...)
+	}
+	b = append(b, byte(port>>8), byte(port))
+	if _, ctxErr = c.Write(b); ctxErr != nil {
+		return
+	}
+
+	if _, ctxErr = io.ReadFull(c, b[:4]); ctxErr != nil {
+		return
+	}
+	if b[0] != Version5 {
+		return nil, errors.New("unexpected protocol version " + strconv.Itoa(int(b[0])))
+	}
+	if cmdErr := Reply(b[1]); cmdErr != StatusSucceeded {
+		return nil, errors.New("unknown error " + cmdErr.String())
+	}
+	if b[2] != 0 {
+		return nil, errors.New("non-zero reserved field")
+	}
+	l := 2
+	var a Addr
+	switch b[3] {
+	case AddrTypeIPv4:
+		l += net.IPv4len
+		a.IP = make(net.IP, net.IPv4len)
+	case AddrTypeIPv6:
+		l += net.IPv6len
+		a.IP = make(net.IP, net.IPv6len)
+	case AddrTypeFQDN:
+		if _, err := io.ReadFull(c, b[:1]); err != nil {
+			return nil, err
+		}
+		l += int(b[0])
+	default:
+		return nil, errors.New("unknown address type " + strconv.Itoa(int(b[3])))
+	}
+	if cap(b) < l {
+		b = make([]byte, l)
+	} else {
+		b = b[:l]
+	}
+	if _, ctxErr = io.ReadFull(c, b); ctxErr != nil {
+		return
+	}
+	if a.IP != nil {
+		copy(a.IP, b)
+	} else {
+		a.Name = string(b[:len(b)-2])
+	}
+	a.Port = int(b[len(b)-2])<<8 | int(b[len(b)-1])
+	return &a, nil
+}
+
+func splitHostPort(address string) (string, int, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", 0, err
+	}
+	portnum, err := strconv.Atoi(port)
+	if err != nil {
+		return "", 0, err
+	}
+	if 1 > portnum || portnum > 0xffff {
+		return "", 0, errors.New("port number out of range " + port)
+	}
+	return host, portnum, nil
+}
 
 // A Command represents a SOCKS command.
 type Command int
@@ -63,27 +210,6 @@ func (code Reply) String() string {
 		return "unknown code: " + strconv.Itoa(int(code))
 	}
 }
-
-// Wire protocol constants.
-const (
-	Version5 = 0x05
-
-	AddrTypeIPv4 = 0x01
-	AddrTypeFQDN = 0x03
-	AddrTypeIPv6 = 0x04
-
-	CmdConnect Command = 0x01 // establishes an active-open forward proxy connection
-	CmdBind    Command = 0x02 // establishes a passive-open forward proxy connection
-	CmdUdp     Command = 0x03 // establishes an active-open forward proxy connection with udp protocol
-
-	AuthUsernamePasswordVersion              = 0x01 // username password authentication version
-	AuthMethodNotRequired         AuthMethod = 0x00 // no authentication required
-	AuthMethodUsernamePassword    AuthMethod = 0x02 // use username/password
-	AuthMethodNoAcceptableMethods AuthMethod = 0xff // no acceptable authentication methods
-
-	StatusSucceeded Reply = 0x00
-	StatusFailed    Reply = 0x01
-)
 
 // An Addr represents a SOCKS-specific address.
 // Either Name or IP is used exclusively.
@@ -213,6 +339,8 @@ func (d *Dialer) DialWithConn(ctx context.Context, c net.Conn, network, address 
 //
 // Deprecated: Use DialContext or DialWithConn instead.
 func (d *Dialer) Dial(network, address string) (net.Conn, error) {
+	fmt.Println(network)
+	fmt.Println(address)
 	if err := d.validateTarget(network, address); err != nil {
 		proxy, dst, _ := d.pathAddrs(address)
 		return nil, &net.OpError{Op: d.Cmd.String(), Net: network, Source: proxy, Addr: dst, Err: err}
@@ -238,6 +366,7 @@ func (d *Dialer) Dial(network, address string) (net.Conn, error) {
 func (d *Dialer) validateTarget(network, address string) error {
 	switch network {
 	case "tcp", "tcp6", "tcp4":
+	case "udp", "udp6", "udp4":
 	default:
 		return errors.New("network not implemented")
 	}
@@ -302,8 +431,6 @@ func (up *UsernamePassword) Authenticate(ctx context.Context, rw io.ReadWriter, 
 		b = append(b, up.Username...)
 		b = append(b, byte(len(up.Password)))
 		b = append(b, up.Password...)
-		// TODO(mikio): handle IO deadlines and cancelation if
-		// necessary
 		if _, err := rw.Write(b); err != nil {
 			return err
 		}
@@ -319,4 +446,16 @@ func (up *UsernamePassword) Authenticate(ctx context.Context, rw io.ReadWriter, 
 		return nil
 	}
 	return errors.New("unsupported authentication method " + strconv.Itoa(int(auth)))
+}
+
+func SOCKS5(network, address string, auth *UsernamePassword) (*Dialer, error) {
+	d := NewDialer(network, address)
+	if auth != nil {
+		d.AuthMethods = []AuthMethod{
+			AuthMethodNotRequired,
+			AuthMethodUsernamePassword,
+		}
+		d.Authenticate = auth.Authenticate
+	}
+	return d, nil
 }

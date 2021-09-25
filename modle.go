@@ -1,19 +1,32 @@
-package server
+package socks5
 
 import (
 	"bytes"
 	"encoding/binary"
 	"net"
-	"socks5/socks"
 	"strconv"
 )
 
+/*
+   +----+----------+----------+
+   |VER | NMETHODS | METHODS  |
+   +----+----------+----------+
+   | 1  |    1     | 1 to 255 |
+   +----+----------+----------+
+*/
 type NegotiationRequest struct {
 	VER      byte
 	NMETHODS byte
 	METHODS  []byte
 }
 
+/*
+   +----+--------+
+   |VER | METHOD |
+   +----+--------+
+   | 1  |   1    |
+   +----+--------+
+*/
 type NegotiationReply struct {
 	VER    byte
 	METHOD byte
@@ -23,6 +36,13 @@ func (n NegotiationReply) ToBytes() []byte {
 	return []byte{n.VER, n.METHOD}
 }
 
+/*
+   +----+------+----------+------+----------+
+   |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
+   +----+------+----------+------+----------+
+   | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
+   +----+------+----------+------+----------+
+*/
 type UsernamePasswordSubnegotiation struct {
 	VER    byte
 	ULEN   byte
@@ -31,6 +51,13 @@ type UsernamePasswordSubnegotiation struct {
 	PASSWD []byte
 }
 
+/*
+   +----+--------+
+   |VER | STATUS |
+   +----+--------+
+   | 1  |   1    |
+   +----+--------+
+*/
 type UsernamePasswordSubnegotiationResponse struct {
 	VER    byte
 	STATUS byte
@@ -42,13 +69,11 @@ func (r UsernamePasswordSubnegotiationResponse) ToBytes() []byte {
 
 // Request
 /*
-
-+----+-----+-------+------+----------+----------+
-|VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
-+----+-----+-------+------+----------+----------+
-| 1  |  1  | X'00' |  1   | Variable |    2     |
-+----+-----+-------+------+----------+----------+
-
+   +----+-----+-------+------+----------+----------+
+   |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
+   +----+-----+-------+------+----------+----------+
+   | 1  |  1  | X'00' |  1   | Variable |    2     |
+   +----+-----+-------+------+----------+----------+
 */
 type Request struct {
 	VER     byte
@@ -61,7 +86,7 @@ type Request struct {
 
 func (r *Request) Address() string {
 	var s string
-	if r.ATYP == socks.AddrTypeFQDN {
+	if r.ATYP == AddrTypeFQDN {
 		s = bytes.NewBuffer(r.DSTADDR).String()
 	} else {
 		s = net.IP(r.DSTADDR).String()
